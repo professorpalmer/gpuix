@@ -10,7 +10,17 @@ import type {
   PublicInstance,
   StyleDesc,
 } from "../types/host.js"
-import { GELATIN, onFrame, stepSpring, type SpringTrack } from "../motion-spring.js"
+import {
+  allSpringChannelsRest,
+  animateSignature,
+  GELATIN,
+  seedSpringTrack,
+  SPRING_KEYS,
+  stepSpringLease,
+  subscribeSpringTick,
+  type SpringKey,
+  type SpringTrack,
+} from "../motion-spring.js"
 
 export const gpuixComponents = {
   div: "div",
@@ -44,19 +54,6 @@ export interface MotionDivProps extends MotionProps {
   autoFocus?: boolean
 }
 
-const SPRING_KEYS = [
-  "width",
-  "height",
-  "opacity",
-  "top",
-  "right",
-  "bottom",
-  "left",
-  "borderRadius",
-] as const
-
-type SpringKey = (typeof SPRING_KEYS)[number]
-
 function isSpringTransition(
   transition: MotionProps["transition"]
 ): transition is MotionSpringTransition {
@@ -84,35 +81,46 @@ const MotionDiv = forwardRef<PublicInstance, MotionDivProps>(function MotionDiv(
     return seed
   })
   const tracks = useRef<Partial<Record<SpringKey, SpringTrack>>>({})
+  const paintedRef = useRef(current)
   const transitionRef = useRef(transition)
   transitionRef.current = transition
+  const targetSignature = spring ? animateSignature(animate) : ""
 
   useEffect(() => {
     if (!spring) return
-    return onFrame((dt) => {
-      const spec = transitionRef.current
-      if (!isSpringTransition(spec)) return
-      const stiffness = spec.stiffness ?? GELATIN.stiffness
-      const damping = spec.damping ?? GELATIN.damping
-      const mass = spec.mass ?? GELATIN.mass
-      const kick = spec.velocity ?? 0
-      const target = animateRef.current
-      let changed = false
-      const next: MotionStyle = {}
-      for (const key of SPRING_KEYS) {
-        const to = target[key]
-        if (to == null) continue
-        const rest = key === "opacity" ? 0.002 : 0.05
-        let track = tracks.current[key]
-        if (!track) track = { pos: to, vel: kick }
-        const stepped = stepSpring(track, to, dt, stiffness, damping, mass, rest)
-        if (stepped.pos !== track.pos || stepped.vel !== track.vel) changed = true
-        tracks.current[key] = stepped
-        next[key] = stepped.pos
+    const spec = transitionRef.current
+    const kick = isSpringTransition(spec) ? (spec.velocity ?? 0) : 0
+    const target = animateRef.current
+    for (const key of SPRING_KEYS) {
+      const to = target[key]
+      if (to == null) continue
+      seedSpringTrack(tracks.current, key, paintedRef.current[key], to, kick)
+    }
+    if (allSpringChannelsRest(tracks.current, target)) return
+
+    let elapsedMs = 0
+    return subscribeSpringTick((dt) => {
+      const live = transitionRef.current
+      if (!isSpringTransition(live)) return false
+      elapsedMs += dt * 1000
+      const result = stepSpringLease({
+        tracks: tracks.current,
+        target: animateRef.current,
+        painted: paintedRef.current,
+        dt,
+        elapsedMs,
+        stiffness: live.stiffness ?? GELATIN.stiffness,
+        damping: live.damping ?? GELATIN.damping,
+        mass: live.mass ?? GELATIN.mass,
+        kick: live.velocity ?? 0,
+      })
+      if (result.publish) {
+        paintedRef.current = result.painted
+        setCurrent(result.painted)
       }
-      if (changed) setCurrent(next)
+      return result.moving
     })
-  }, [spring])
+  }, [spring, targetSignature])
 
   if (spring) {
     const hostProps: Props = {
